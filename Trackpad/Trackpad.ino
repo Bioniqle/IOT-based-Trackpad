@@ -4,10 +4,16 @@ const float W = 32, H = 18, R = 2.5;
 const float PX[2] = {0, 16}, PY[2] = {9, 0}, OFF[2] = {-90, 0};
 const float K[2] = {0.0343, 0.0343}, ZD[2] = {0.5, 0.5}, EM[2] = {1.5, 1.5};
 const byte TRG[2] = {A2, A0}, ECH[2] = {A3, A1}, SRV[2] = {10, 9};
+
 const int DIT[4] = {-3, 0, 3, 0};
-const float BL = 4, GT = 7, SWS = 2, SL = 6;
+// SL increased to 10 for faster servo tracking
+const float BL = 4, GT = 7, SWS = 2, SL = 10; 
 const int AMIN = 35, AMAX = 145, ML = 6;
 const unsigned long TO = 4000;
+
+// New Predictive Tracking Constants & Globals
+const float LEAD = 3, VA = 0.5, VMAX = 3;
+float vx = 0, vy = 0;
 
 Servo sv[2];
 float ang[2] = {90, 90}, ba[2][4], bd[2][4], tx = 16, ty = 9, sw = 90;
@@ -40,8 +46,10 @@ float lim(float ox, float oy, float r) {
 
 bool acc(byte i, float d, float ox, float oy, float r, float qx, float qy) {
   if (d < 2) return false;
-  float hx = ox + d * cos(r) - qx, hy = oy + d * sin(r) - qy;
-  if (hx * hx + hy * hy < BL * BL) return false;
+  float px = ox + d * cos(r), py = oy + d * sin(r);
+  
+  if (hypot(px - qx, py - qy) < BL || hypot(px - PX[1 - i], py - PY[1 - i]) < BL) return false;
+  
   float l = lim(ox, oy, r);
   if (lock) return fabs(d - hypot(tx - ox, ty - oy)) < GT && d < l + 1;
   return d < l - EM[i];
@@ -102,7 +110,7 @@ void loop() {
 
   byte tot = n[0] + n[1];
 
-  if (tot >= (lock ? 1 : 2)) {
+  if (tot >= (lock ? 1 : 2)) { 
     miss = 0;
     float fx, fy;
     if (n[0] && n[1]) {
@@ -128,27 +136,47 @@ void loop() {
       fx = hx[b];
       fy = hy[b];
     }
+    
+    // Updated Velocity/Momentum lock logic
+    float ox0 = tx, oy0 = ty;
     if (!lock) {
       tx = fx;
       ty = fy;
+      vx = vy = 0;
       lock = true;
     } else {
       float a = constrain(hypot(fx - tx, fy - ty) / 6, 0.15, 0.7);
       tx += a * (fx - tx);
       ty += a * (fy - ty);
+      vx += VA * (constrain(tx - ox0, -VMAX, VMAX) - vx);
+      vy += VA * (constrain(ty - oy0, -VMAX, VMAX) - vy);
     }
     tx = constrain(tx, 0, W);
     ty = constrain(ty, 0, H);
+    
   } else if (lock && ++miss >= ML) {
     lock = false;
     sw = constrain((ang[0] + ang[1]) / 2, 45, 135);
     memset(bo, 0, sizeof bo);
+  } else if (lock) {
+    // Coasting: object temporarily lost, continue predicting its path
+    tx = constrain(tx + vx, 0, W);
+    ty = constrain(ty + vy, 0, H);
+    vx *= 0.8;
+    vy *= 0.8;
   }
 
   if (lock) {
-    for (byte i = 0; i < 2; i++)
-      tgt[i] = atan2(ty - PY[i], tx - PX[i]) * RAD_TO_DEG - OFF[i] + DIT[dk];
+    // Predictive Lead Aiming
+    float ax = constrain(tx + LEAD * vx, 0, W);
+    float ay = constrain(ty + LEAD * vy, 0, H);
+    
+    for (byte i = 0; i < 2; i++) {
+      tgt[i] = atan2(ay - PY[i], ax - PX[i]) * RAD_TO_DEG - OFF[i] + DIT[dk];
+      if (hypot(ax - PX[i], ay - PY[i]) < BL) tgt[i] = ang[i];
+    }
     dk = (dk + 1) & 3;
+    
     Serial.print(tx, 2);
     Serial.print(',');
     Serial.println(ty, 2);
